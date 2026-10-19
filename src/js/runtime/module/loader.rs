@@ -39,7 +39,8 @@ impl GraphLoader {
             return Ok(());
         }
         if let Some(mut module) = module.as_source_text_module() {
-            if module.state() == ModuleState::New && loader.borrow_mut().visited.insert(module.id())
+            if matches!(module.state(), ModuleState::New | ModuleState::Unlinked)
+                && loader.borrow_mut().visited.insert(module.id())
             {
                 module.set_state(ModuleState::Unlinked);
                 let requests = module.requested_modules();
