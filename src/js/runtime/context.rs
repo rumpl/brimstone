@@ -76,6 +76,7 @@ pub struct Context {
 }
 
 pub struct ContextCell {
+    pub embedding: super::embedding::Embedding,
     pub heap: Heap,
     pub names: BuiltinNames,
     pub symbols: BuiltinSymbols,
@@ -149,6 +150,7 @@ pub struct ContextCell {
 impl Context {
     fn new(options: Rc<Options>) -> AllocResult<Context> {
         let cx_cell = Box::new(ContextCell {
+            embedding: Default::default(),
             heap: Heap::new(options.min_heap_size),
             global_symbol_registry: HeapPtr::uninit(),
             names: BuiltinNames::uninit(),
@@ -244,6 +246,10 @@ impl Context {
         // Deserialize the heap roots
         HeapRootsDeserializer::deserialize(cx, serialized);
         self.heap.init_from_serialized(cx, serialized);
+    }
+
+    pub fn identity(&self) -> usize {
+        self.ptr.as_ptr() as usize
     }
 
     pub fn from_ptr(ptr: NonNull<ContextCell>) -> Context {
@@ -662,6 +668,7 @@ impl Context {
     fn visit_post_initialization_roots(&mut self, visitor: &mut impl HeapVisitor) {
         self.heap.visit_roots(visitor);
         self.task_queue.visit_roots(visitor);
+        self.embedding.visit_roots(visitor);
 
         if let Some(vm) = &mut self.vm {
             vm.visit_roots(visitor);

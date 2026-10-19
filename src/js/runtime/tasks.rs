@@ -31,6 +31,10 @@ impl TaskQueue {
         Self { tasks: VecDeque::new() }
     }
 
+    pub fn pending(&self) -> bool {
+        !self.tasks.is_empty()
+    }
+
     pub fn enqueue(&mut self, task: Task) {
         self.tasks.push_back(task);
     }
@@ -118,7 +122,17 @@ impl TaskQueue {
 impl Context {
     /// Run all tasks until the task queue is empty.
     pub fn run_all_tasks(&mut self) -> EvalResult<()> {
-        while let Some(task) = self.task_queue().tasks.pop_front() {
+        self.run_tasks(usize::MAX).map(|_| ())
+    }
+
+    /// Runs at most `limit` tasks, leaving the remaining tasks rooted and queued.
+    pub fn run_tasks(&mut self, limit: usize) -> EvalResult<usize> {
+        let mut count = 0;
+        while count < limit {
+            let Some(task) = self.task_queue().tasks.pop_front() else {
+                break;
+            };
+            count += 1;
             handle_scope!(*self, {
                 match task {
                     Task::Callback1(task) => task.execute(*self),
@@ -129,7 +143,7 @@ impl Context {
             })?;
         }
 
-        Ok(())
+        Ok(count)
     }
 }
 

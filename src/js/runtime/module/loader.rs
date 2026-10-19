@@ -22,148 +22,129 @@ use crate::{
     },
 };
 
-/// GraphLoadingStateRecord (https://tc39.es/ecma262/#graphloadingstate-record)
+/// A graph loader may outlive the current VM turn while the host fetches imports.
 struct GraphLoader {
     is_loading: bool,
-    pending_modules_count: usize,
+    pending: usize,
     visited: HashSet<ModuleId>,
-    promise_capability: Handle<PromiseCapability>,
-    realm: Handle<Realm>,
+    capability: crate::runtime::embedding::Persistent,
+    realm: crate::runtime::embedding::Persistent,
 }
 
+type SharedLoader = Rc<std::cell::RefCell<GraphLoader>>;
+
 impl GraphLoader {
-    /// InnerModuleLoading (https://tc39.es/ecma262/#sec-InnerModuleLoading)
-    fn inner_module_loading(&mut self, cx: Context, module: DynModule) -> AllocResult<()> {
+    fn inner(loader: &SharedLoader, cx: Context, module: DynModule) -> AllocResult<()> {
+        if !loader.borrow().is_loading {
+            return Ok(());
+        }
         if let Some(mut module) = module.as_source_text_module() {
-            if module.state() == ModuleState::New && self.visited.insert(module.id()) {
+            if module.state() == ModuleState::New && loader.borrow_mut().visited.insert(module.id())
+            {
                 module.set_state(ModuleState::Unlinked);
-
-                let module_requests = module.requested_modules();
-                let loaded_modules = module.loaded_modules();
-
-                self.pending_modules_count += module_requests.len();
-
-                for i in 0..module_requests.len() {
-                    match loaded_modules.as_slice()[i] {
-                        Some(loaded_module) => {
-                            self.inner_module_loading(cx, DynModule::from_heap(&loaded_module))?
-                        }
-                        None => {
-                            let module_request =
-                                ModuleRequest::from_heap(&module_requests.as_slice()[i]);
-
-                            // Create the SourceTextModule for the module with the given specifier,
-                            // or evaluate to an error.
-                            let load_result = host_load_imported_module(
-                                cx,
-                                module.source_file_path(),
-                                module_request,
-                                self.realm,
-                            );
-
-                            // Continue module loading with the SourceTextModule or error result
-                            self.finish_loading_imported_module(
-                                cx,
-                                module,
-                                module_request,
-                                load_result,
-                            )?;
-                        }
+                let requests = module.requested_modules();
+                loader.borrow_mut().pending += requests.len();
+                for i in 0..requests.len() {
+                    // Reload arrays after each callback: callbacks may allocate and collect.
+                    let loaded = module.loaded_modules().as_slice()[i];
+                    if let Some(loaded) = loaded {
+                        Self::inner(loader, cx, DynModule::from_heap(&loaded))?;
+                    } else {
+                        let request =
+                            ModuleRequest::from_heap(&module.requested_modules().as_slice()[i]);
+                        let realm = loader.borrow().realm.get(cx).cast::<Realm>();
+                        let loader = loader.clone();
+                        let root = crate::runtime::embedding::Persistent::new(cx, module.into());
+                        request_imported_module(
+                            cx,
+                            module.source_file_path(),
+                            request,
+                            realm,
+                            Box::new(move |cx, result| {
+                                let mut module = root.get(cx).cast::<SourceTextModule>();
+                                if let Ok(imported) = result {
+                                    if !module.has_loaded_module_at(i) {
+                                        module.set_loaded_module_at(i, imported);
+                                    }
+                                }
+                                Self::finish(&loader, cx, result)
+                            }),
+                        )?;
                     }
-
-                    if !self.is_loading {
+                    if !loader.borrow().is_loading {
                         return Ok(());
                     }
                 }
             }
         }
-
-        self.pending_modules_count -= 1;
-
-        if self.pending_modules_count == 0 {
-            self.is_loading = false;
-
-            must_a!(call_object(
-                cx,
-                self.promise_capability.resolve(),
-                cx.undefined(),
-                &[cx.undefined()]
-            ));
-        }
-
+        let capability = {
+            let mut state = loader.borrow_mut();
+            state.pending -= 1;
+            if state.pending != 0 {
+                return Ok(());
+            }
+            state.is_loading = false;
+            state.capability.get(cx).cast::<PromiseCapability>()
+        };
+        must_a!(call_object(cx, capability.resolve(), cx.undefined(), &[cx.undefined()]));
         Ok(())
     }
 
-    /// FinishLoadingImportedModule (https://tc39.es/ecma262/#sec-FinishLoadingImportedModule)
-    fn finish_loading_imported_module(
-        &mut self,
+    fn finish(
+        loader: &SharedLoader,
         cx: Context,
-        mut referrer: Handle<SourceTextModule>,
-        module_request: ModuleRequest,
-        module_result: EvalResult<DynModule>,
+        result: EvalResult<DynModule>,
     ) -> AllocResult<()> {
-        if let Ok(module) = module_result {
-            let module_index = referrer
-                .lookup_module_request_index(&module_request.to_heap())
-                .unwrap();
-            if !referrer.has_loaded_module_at(module_index) {
-                referrer.set_loaded_module_at(module_index, module);
-            }
-        }
-
-        self.continue_module_loading(cx, module_result)
-    }
-
-    /// ContinueModuleLoading (https://tc39.es/ecma262/#sec-ContinueModuleLoading)
-    fn continue_module_loading(
-        &mut self,
-        cx: Context,
-        module_result: EvalResult<DynModule>,
-    ) -> AllocResult<()> {
-        if !self.is_loading {
+        if !loader.borrow().is_loading {
             return Ok(());
         }
-
-        match completion_value!(module_result) {
-            Ok(module) => {
-                self.inner_module_loading(cx, module)?;
-            }
+        match completion_value!(result) {
+            Ok(module) => Self::inner(loader, cx, module),
             Err(error) => {
-                self.is_loading = false;
-                must_a!(call_object(
-                    cx,
-                    self.promise_capability.reject(),
-                    cx.undefined(),
-                    &[error]
-                ));
+                let capability = {
+                    let mut state = loader.borrow_mut();
+                    state.is_loading = false;
+                    state.capability.get(cx).cast::<PromiseCapability>()
+                };
+                must_a!(call_object(cx, capability.reject(), cx.undefined(), &[error]));
+                Ok(())
             }
         }
-
-        Ok(())
     }
 }
 
-/// LoadRequestedModules (https://tc39.es/ecma262/#sec-LoadRequestedModules)
 pub fn load_requested_modules(
     cx: Context,
     module: Handle<SourceTextModule>,
 ) -> AllocResult<Handle<PromiseObject>> {
-    let promise_constructor = cx.get_intrinsic(Intrinsic::PromiseConstructor);
-    let capability = must_a!(PromiseCapability::new(cx, promise_constructor.into()));
-    let realm = module.program_function_ptr().realm();
-
-    let mut graph_loader = GraphLoader {
+    use crate::runtime::embedding::Persistent;
+    let capability = must_a!(PromiseCapability::new(
+        cx,
+        cx.get_intrinsic(Intrinsic::PromiseConstructor).into()
+    ));
+    let loader = Rc::new(std::cell::RefCell::new(GraphLoader {
         is_loading: true,
-        pending_modules_count: 1,
+        pending: 1,
         visited: HashSet::new(),
-        promise_capability: capability,
-        realm,
-    };
-
-    graph_loader.inner_module_loading(cx, module.as_dyn_module())?;
-
-    // Known to be a PromiseObject since it was created by the intrinsic Promise constructor
+        capability: Persistent::new(cx, capability.into()),
+        realm: Persistent::new(cx, module.program_function_ptr().realm().into()),
+    }));
+    GraphLoader::inner(&loader, cx, module.as_dyn_module())?;
     Ok(capability.promise().cast::<PromiseObject>())
+}
+
+pub fn request_imported_module(
+    cx: Context,
+    path: Handle<FlatString>,
+    request: ModuleRequest,
+    realm: Handle<Realm>,
+    finish: crate::runtime::embedding::ModuleCompletion,
+) -> AllocResult<()> {
+    if let Some(loader) = cx.embedding.module_loader.clone() {
+        loader(cx, path, request, realm, finish)
+    } else {
+        finish(cx, host_load_imported_module(cx, path, request, realm))
+    }
 }
 
 /// HostLoadImportedModule (https://tc39.es/ecma262/#sec-HostLoadImportedModule)

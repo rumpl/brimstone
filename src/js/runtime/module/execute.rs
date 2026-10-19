@@ -17,7 +17,7 @@ use crate::{
         },
         module::{
             import_attributes::ImportAttributes,
-            loader::host_load_imported_module,
+            loader::request_imported_module,
             module::{DynModule, Module, ModuleEnum, ModuleId},
             source_text_module::{ModuleRequest, ModuleState, SourceTextModule},
             synthetic_module::SyntheticModule,
@@ -41,11 +41,14 @@ pub fn execute_module(
     let capability = must_a!(PromiseCapability::new(cx, promise_constructor.into()));
 
     // Cache the module at its canonical source path
-    let canonical_path = Path::new(&module.source_file_path().to_string())
-        .canonicalize()
-        .unwrap();
-    let source_file_path =
-        must_a!(cx.alloc_string_ptr(canonical_path.to_str().unwrap())).to_handle();
+    let source_file_path = if cx.embedding.module_loader.is_some() {
+        module.source_file_path()
+    } else {
+        let canonical_path = Path::new(&module.source_file_path().to_string())
+            .canonicalize()
+            .unwrap();
+        must_a!(cx.alloc_string_ptr(canonical_path.to_str().unwrap())).to_handle()
+    };
 
     // Modules executing directly are assumed to have no attributes
     let module_cache_key = ModuleCacheKey::new(source_file_path, None);
@@ -630,9 +633,17 @@ pub fn dynamic_import(
 
     let module_request = ModuleRequest { specifier, attributes };
 
-    let load_completion =
-        host_load_imported_module(cx, source_file_path, module_request, cx.current_realm());
-    continue_dynamic_import(cx, capability, load_completion)?;
+    let root = crate::runtime::embedding::Persistent::new(cx, capability.into());
+    request_imported_module(
+        cx,
+        source_file_path,
+        module_request,
+        cx.current_realm(),
+        Box::new(move |cx, result| {
+            let capability = root.get(cx).cast::<PromiseCapability>();
+            continue_dynamic_import(cx, capability, result)
+        }),
+    )?;
 
     Ok(capability.promise())
 }

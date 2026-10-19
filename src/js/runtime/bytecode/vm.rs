@@ -739,6 +739,10 @@ impl VM {
 
     /// An empty frame pointer indicates that the stack is empty, no bytecode is currently
     /// executing, and the VM stack does not need to be walked for GC roots.
+    pub fn has_active_frames(&self) -> bool {
+        self.is_executing()
+    }
+
     fn is_executing(&self) -> bool {
         !self.fp().is_null()
     }
@@ -785,6 +789,10 @@ impl VM {
         let mut local_pc = self.published_pc();
 
         'dispatch: loop {
+            if self.cx().embedding.is_terminated() {
+                self.publish_pc(local_pc);
+                return self.execute_throw(self.cx().undefined());
+            }
             // Set the local PC without publishing it. Only valid when nothing between here and the
             // next publish can allocate, throw, or cross a runtime boundary.
             macro_rules! set_local_pc {
@@ -4960,6 +4968,21 @@ impl VM {
             let dest = instr.dest();
 
             // May allocate
+            if receiver.is_nullish() {
+                let property_key = to_property_key(self.cx(), key)?;
+                return type_error(
+                    self.cx(),
+                    &format!(
+                        "Cannot read property '{}' of {}",
+                        property_key.format()?,
+                        if receiver.is_null() {
+                            "null"
+                        } else {
+                            "undefined"
+                        }
+                    ),
+                );
+            }
             let coerced_receiver = to_object(self.cx(), receiver)?;
             let property_key = to_property_key(self.cx(), key)?;
 
@@ -5110,6 +5133,21 @@ impl VM {
         instr: &GetNamedPropertyInstruction<W>,
     ) -> EvalResult<()> {
         let receiver_value = self.read_register(instr.object());
+        if receiver_value.is_nullish() {
+            let key = self.get_property_key_constant(instr.name_constant_index());
+            return type_error(
+                self.cx(),
+                &format!(
+                    "Cannot read property '{}' of {}",
+                    key.format()?,
+                    if receiver_value.is_null() {
+                        "null"
+                    } else {
+                        "undefined"
+                    }
+                ),
+            );
+        }
 
         let fill_cache = 'full_path: {
             if !receiver_value.is_object() {
@@ -6809,7 +6847,13 @@ impl VM {
     #[inline(never)]
     fn execute_throw(&mut self, error_value: Handle<Value>) -> EvalResult<()> {
         let mut stack_frame = self.stack_frame();
-        if self.visit_frame_for_exception_unwinding(stack_frame, self.published_pc(), error_value) {
+        if !self.cx().embedding.is_terminated()
+            && self.visit_frame_for_exception_unwinding(
+                stack_frame,
+                self.published_pc(),
+                error_value,
+            )
+        {
             return Ok(());
         }
 
@@ -6824,11 +6868,13 @@ impl VM {
                 return eval_err!(error_value);
             }
 
-            if self.visit_frame_for_exception_unwinding(
-                caller_stack_frame,
-                stack_frame.return_address(),
-                error_value,
-            ) {
+            if !self.cx().embedding.is_terminated()
+                && self.visit_frame_for_exception_unwinding(
+                    caller_stack_frame,
+                    stack_frame.return_address(),
+                    error_value,
+                )
+            {
                 return Ok(());
             }
 

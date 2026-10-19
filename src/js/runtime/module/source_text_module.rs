@@ -441,7 +441,11 @@ impl Handle<SourceTextModule> {
         }
 
         // No properties are added to the `import.meta` object - this is up to the implementation
-        let object = *ordinary_object_create_without_proto(cx)?;
+        let object = ordinary_object_create_without_proto(cx)?;
+        if let Some(init) = cx.embedding.import_meta.clone() {
+            init(cx, self.source_file_path(), object)?;
+        }
+        let object = *object;
 
         self.import_meta = Some(object);
 

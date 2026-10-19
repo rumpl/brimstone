@@ -2367,6 +2367,15 @@ impl<'a> BytecodeFunctionGenerator<'a> {
             None
         };
 
+        let completion = if program.kind == ast::ProgramKind::Script {
+            let register = self.register_allocator.allocate()?;
+            self.writer.load_undefined_instruction(register);
+            self.set_statement_completion_dest(register);
+            Some(register)
+        } else {
+            None
+        };
+
         // Program function consists of toplevel statements
         for toplevel in toplevels {
             self.gen_toplevel(program, toplevel)?;
@@ -2375,7 +2384,10 @@ impl<'a> BytecodeFunctionGenerator<'a> {
         // Scope end not needed since the function returns
 
         // Return undefined at end of program function
-        self.gen_return(/* return_arg */ None, /* derived_constructor_scope */ None)?;
+        self.gen_return(completion, /* derived_constructor_scope */ None)?;
+        if let Some(register) = completion {
+            self.register_allocator.release(register);
+        }
 
         // Write the exception handler if this is an async module function
         if let Some(body_handler_start) = async_body_handler_start {
