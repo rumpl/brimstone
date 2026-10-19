@@ -3,7 +3,7 @@ use crate::{
     intrinsic_methods,
     runtime::{
         Context, Handle,
-        abstract_operations::get,
+        abstract_operations::{define_property_or_throw, get},
         alloc_error::AllocResult,
         error::type_error,
         intrinsic_builder::IntrinsicBuilder,
@@ -33,7 +33,11 @@ impl ErrorPrototype {
 
         builder.data(cx.names.name(), cx.names.error().as_string().into())?;
         builder.data(cx.names.message(), cx.names.empty_string().as_string().into())?;
-        builder.getter(cx.names.stack(), RuntimeFunction::ErrorPrototype_get_stack)?;
+        builder.getter_setter(
+            cx.names.stack(),
+            RuntimeFunction::ErrorPrototype_get_stack,
+            RuntimeFunction::ErrorPrototype_set_stack,
+        )?;
 
         builder.build()
     }
@@ -69,6 +73,22 @@ impl ErrorPrototype {
             let separator = cx.alloc_static_string(": ")?;
             Ok(StringValue::concat_all(cx, &[name_string, separator, message_string])?.as_value())
         }
+    }}
+
+    runtime_fn! {
+    fn set_stack(cx, this_value, arguments) {
+        if !this_value.is_object() {
+            return type_error(cx, "Error stack setter requires an object");
+        }
+        // Defining an own data property also permits Error subclass prototypes to
+        // override the inherited stack accessor without invoking it recursively.
+        let value = arguments.get(cx, 0);
+        let descriptor = crate::runtime::PropertyDescriptor::data(
+            value,
+            crate::runtime::PropertyFlags::from_data_attributes(true, false, true),
+        );
+        define_property_or_throw(cx, this_value.as_object(), cx.names.stack(), descriptor)?;
+        Ok(cx.undefined())
     }}
 
     runtime_fn! {

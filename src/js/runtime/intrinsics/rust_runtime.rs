@@ -388,6 +388,7 @@ rust_runtime_functions!(
     (ErrorConstructor_construct, ErrorConstructor::construct),
     (ErrorConstructor_is_error, ErrorConstructor::is_error),
     (ErrorPrototype_get_stack, ErrorPrototype::get_stack),
+    (ErrorPrototype_set_stack, ErrorPrototype::set_stack),
     (ErrorPrototype_to_string, ErrorPrototype::to_string),
     (EvalErrorConstructor_construct, EvalErrorConstructor::construct),
     (
